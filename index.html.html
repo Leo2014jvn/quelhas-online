@@ -1,0 +1,207 @@
+<!DOCTYPE html>
+<html lang="pt">
+<head>
+    <meta charset="UTF-8">
+    <title>Quelhas Pro - Interação Total</title>
+    <script src="https://unpkg.com/peerjs@1.5.2/dist/peerjs.min.js"></script>
+    <style>
+        :root { --p1: #ff4757; --p2: #ffa502; --bg: #121212; --card: #1e272e; }
+        body { font-family: 'Segoe UI', sans-serif; background: var(--bg); color: white; display: flex; flex-direction: column; align-items: center; padding: 10px; margin: 0; }
+        .overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.95); display: flex; justify-content: center; align-items: center; z-index: 1000; }
+        .modal { background: var(--card); padding: 30px; border-radius: 15px; width: 380px; text-align: center; border: 2px solid #444; }
+        input, select { width: 100%; padding: 12px; margin: 8px 0; border-radius: 6px; border: 1px solid #555; background: #2f3542; color: white; box-sizing: border-box; }
+        #tabuleiro { display: grid; grid-template-columns: repeat(10, 42px); gap: 5px; background: #2f3542; padding: 10px; border-radius: 10px; border: 2px solid #57606f; }
+        .cell { width: 42px; height: 42px; background: #f1f2f6; border-radius: 4px; cursor: pointer; transition: 0.2s; }
+        .cell.vertical { background: var(--p1) !important; }
+        .cell.horizontal { background: var(--p2) !important; }
+        .cell.current { border: 3px solid #2ecc71; box-sizing: border-box; transform: scale(0.95); }
+        .scoreboard { display: flex; justify-content: space-between; width: 450px; margin-bottom: 15px; background: #1e272e; padding: 15px; border-radius: 12px; border: 1px solid #444; }
+        .score-box { text-align: center; flex: 1; opacity: 0.4; padding: 10px; border-radius: 8px; }
+        .active-p { opacity: 1; background: #2f3542; border: 1px solid #2ed573; }
+        button { padding: 12px; cursor: pointer; border: none; border-radius: 8px; font-weight: bold; background: #54a0ff; color: white; margin-top: 8px; width: 100%; }
+        .btn-success { background: #2ed573; }
+        .btn-swap { background: #6c5ce7; border: 2px solid #a29bfe; }
+        .hidden { display: none !important; }
+        #status-msg { margin-bottom: 10px; font-weight: bold; height: 20px; color: #feca57; }
+    </style>
+</head>
+<body>
+
+    <div id="menu-principal" class="overlay">
+        <div class="modal">
+            <h1>QUELHAS</h1>
+            <button class="btn-success" onclick="showOnlineMenu()">JOGAR ONLINE</button>
+            <button onclick="showIAMenu()">CONTRA IA</button>
+            <button onclick="startMode('local')">LOCAL</button>
+        </div>
+    </div>
+
+    <div id="menu-ia" class="overlay hidden">
+        <div class="modal"><h3>IA</h3><select id="ia-pos"><option value="1">P1</option><option value="2">P2</option></select>
+        <button class="btn-success" onclick="initIA()">JOGAR</button><button onclick="backToMain()">Sair</button></div>
+    </div>
+    <div id="menu-online" class="overlay hidden">
+        <div class="modal"><h3>Online</h3><input id="on-code" placeholder="Código Sala">
+        <button class="btn-success" onclick="initOnline('host')">CRIAR</button>
+        <button onclick="initOnline('guest')">ENTRAR</button></div>
+    </div>
+
+    <div id="game-ui" class="hidden" style="display:flex; flex-direction:column; align-items:center">
+        <div class="scoreboard">
+            <div id="box-p1" class="score-box"><div id="name-p1">P1</div><small id="l-p1">V</small></div>
+            <div id="box-p2" class="score-box"><div id="name-p2">P2</div><small id="l-p2">H</small></div>
+        </div>
+        <div id="status-msg"></div>
+        <div id="tabuleiro"></div>
+        <div style="width: 450px; margin-top: 15px;">
+            <button id="btn-swap-action" class="btn-swap hidden" onclick="doTheSwap()">🔄 TROCAR E PASSAR TURNO</button>
+            <button id="btn-done" class="btn-success" onclick="handleFinish()" disabled>FINALIZAR JOGADA</button>
+            <button onclick="location.reload()" style="background:#57606f; margin-top: 20px">SAIR DO JOGO</button>
+        </div>
+    </div>
+
+    <script>
+        const SIZE = 10;
+        let board, p1Axis, p2Axis, currentPlayer, currentMoves, firstTurnP2, gameMode, myRole, conn, humanP;
+
+        function resetGameVars() {
+            board = Array(SIZE).fill().map(() => Array(SIZE).fill(0));
+            p1Axis = 'V'; p2Axis = 'H'; currentPlayer = 1; currentMoves = []; firstTurnP2 = true;
+        }
+
+        function handleCellClick(r, c) {
+            // Se clicar numa peça que já faz parte da jogada atual: TENTAR APAGAR
+            const moveIdx = currentMoves.findIndex(m => m.r === r && m.c === c);
+            if (moveIdx !== -1) {
+                tryToRemove(moveIdx);
+                return;
+            }
+
+            // Se for uma casa vazia: TENTAR JOGAR
+            if (board[r][c] === 0) {
+                const axis = (currentPlayer === 1) ? p1Axis : p2Axis;
+                if(currentMoves.length > 0) {
+                    const first = currentMoves[0];
+                    if(axis === 'V' && c !== first.c) return;
+                    if(axis === 'H' && r !== first.r) return;
+                    if(!currentMoves.some(m => Math.abs(r-m.r) + Math.abs(c-m.c) === 1)) return;
+                }
+                board[r][c] = (axis === 'V' ? 1 : 2);
+                currentMoves.push({r, c});
+                if(currentPlayer === 2) firstTurnP2 = false;
+                drawBoard();
+            }
+        }
+
+        function tryToRemove(idx) {
+            if (currentMoves.length <= 1) {
+                const m = currentMoves.splice(idx, 1)[0];
+                board[m.r][m.c] = 0;
+            } else {
+                // Verificar se a remoção quebra a linha em duas
+                const testMoves = [...currentMoves];
+                testMoves.splice(idx, 1);
+                
+                // Se o que restar ainda for contínuo
+                if (isStillConnected(testMoves)) {
+                    const m = currentMoves.splice(idx, 1)[0];
+                    board[m.r][m.c] = 0;
+                } else {
+                    console.log("Não podes dividir a linha!");
+                }
+            }
+            drawBoard();
+        }
+
+        function isStillConnected(moves) {
+            if (moves.length <= 1) return true;
+            // Verificar conectividade simples: cada peça tem de ter pelo menos uma vizinha na lista
+            return moves.every(m1 => 
+                moves.some(m2 => m1 !== m2 && Math.abs(m1.r - m2.r) + Math.abs(m1.c - m2.c) === 1)
+            );
+        }
+
+        function doTheSwap() {
+            let temp = p1Axis; p1Axis = p2Axis; p2Axis = temp;
+            currentPlayer = 1; firstTurnP2 = false;
+            if(gameMode === 'online') conn.send({type: 'swap', p1: p1Axis, p2: p2Axis});
+            drawBoard();
+            if(gameMode === 'ia' && humanP === 2) setTimeout(iaMove, 600);
+        }
+
+        function handleFinish() {
+            const nextP = (currentPlayer === 1) ? 2 : 1;
+            if(gameMode === 'online') conn.send({type: 'move', board: board, nextP: nextP, fP2: firstTurnP2});
+            currentPlayer = nextP; currentMoves = [];
+            drawBoard();
+            if(gameMode === 'ia' && currentPlayer !== humanP) setTimeout(iaMove, 800);
+        }
+
+        function drawBoard() {
+            const grid = document.getElementById('tabuleiro');
+            grid.innerHTML = '';
+            const isMyTurn = (gameMode === 'local') || (gameMode === 'ia' && currentPlayer === humanP) || (gameMode === 'online' && ((myRole==='host' && currentPlayer===1) || (myRole==='guest' && currentPlayer===2)));
+            
+            for(let r=0; r<SIZE; r++) {
+                for(let c=0; c<SIZE; c++) {
+                    const cell = document.createElement('div');
+                    const val = board[r][c];
+                    cell.className = 'cell' + (val === 1 ? ' vertical' : val === 2 ? ' horizontal' : '');
+                    if(currentMoves.some(m => m.r === r && m.c === c)) cell.classList.add('current');
+                    if(isMyTurn) cell.onclick = () => handleCellClick(r, c);
+                    grid.appendChild(cell);
+                }
+            }
+            updateUI(isMyTurn);
+        }
+
+        function updateUI(isMyTurn) {
+            document.getElementById('box-p1').className = 'score-box' + (currentPlayer === 1 ? ' active-p' : '');
+            document.getElementById('box-p2').className = 'score-box' + (currentPlayer === 2 ? ' active-p' : '');
+            document.getElementById('l-p1').innerText = (p1Axis === 'V' ? "Vertical" : "Horizontal");
+            document.getElementById('l-p2').innerText = (p2Axis === 'V' ? "Vertical" : "Horizontal");
+            const canSwap = isMyTurn && currentPlayer === 2 && firstTurnP2 && currentMoves.length === 0;
+            document.getElementById('btn-swap-action').classList.toggle('hidden', !canSwap);
+            document.getElementById('btn-done').disabled = !isMyTurn || currentMoves.length < 2;
+            document.getElementById('status-msg').innerText = isMyTurn ? "TUA VEZ" : "ESPERA...";
+        }
+
+        // IA e Online (Ajustados para o novo fluxo)
+        function iaMove() {
+            const axis = (currentPlayer === 1) ? p1Axis : p2Axis;
+            let segments = [];
+            for (let i = 0; i < SIZE; i++) {
+                let temp = [];
+                for (let j = 0; j < SIZE; j++) {
+                    let r = (axis === 'V' ? j : i), c = (axis === 'V' ? i : j);
+                    if (board[r][c] === 0) temp.push({r,c});
+                    else { if(temp.length >= 2) segments.push(temp); temp = []; }
+                }
+                if(temp.length >= 2) segments.push(temp);
+            }
+            if(segments.length > 0) {
+                segments.sort((a,b) => b.length - a.length)[0].forEach(cell => board[cell.r][cell.c] = (axis==='V'?1:2));
+                handleFinish();
+            }
+        }
+
+        function initOnline(role) {
+            const code = document.getElementById('on-code').value.trim().toLowerCase();
+            if(!code) return;
+            myRole = role; gameMode = 'online';
+            peer = new Peer("quelhas-" + code + (role==='guest'?"-g"+Math.floor(Math.random()*99):""));
+            peer.on('open', () => { if(role==='guest') { conn = peer.connect("quelhas-"+code); setupConn(); } });
+            peer.on('connection', c => { conn = c; setupConn(); });
+        }
+        function setupConn() {
+            conn.on('open', () => { backToMain(); document.getElementById('menu-principal').classList.add('hidden'); document.getElementById('game-ui').classList.remove('hidden'); resetGameVars(); drawBoard(); });
+            conn.on('data', d => { if(d.type==='move'){board=d.board; currentPlayer=d.nextP; firstTurnP2=d.fP2; drawBoard();} else if(d.type==='swap'){p1Axis=d.p1; p2Axis=d.p2; currentPlayer=1; firstTurnP2=false; drawBoard();} });
+        }
+        function initIA() { humanP = parseInt(document.getElementById('ia-pos').value); gameMode = 'ia'; backToMain(); document.getElementById('menu-principal').classList.add('hidden'); document.getElementById('game-ui').classList.remove('hidden'); resetGameVars(); if(humanP===2) setTimeout(iaMove, 600); else drawBoard(); }
+        function startMode(m) { gameMode = m; backToMain(); document.getElementById('menu-principal').classList.add('hidden'); document.getElementById('game-ui').classList.remove('hidden'); resetGameVars(); drawBoard(); }
+        function showOnlineMenu() { backToMain(); document.getElementById('menu-principal').classList.add('hidden'); document.getElementById('menu-online').classList.remove('hidden'); }
+        function showIAMenu() { backToMain(); document.getElementById('menu-principal').classList.add('hidden'); document.getElementById('menu-ia').classList.remove('hidden'); }
+        function backToMain() { document.querySelectorAll('.overlay').forEach(e => e.classList.add('hidden')); document.getElementById('menu-principal').classList.remove('hidden'); }
+    </script>
+</body>
+</html>
